@@ -313,6 +313,33 @@ def aggregate_installments_payments(installments_payments: pd.DataFrame) -> pd.D
     )
 
 
+def add_application_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add classic domain-driven ratio features on the application table.
+
+    Bu oranlar Home Credit/Kaggle community'sinin yıllar içinde valide ettiği
+    güçlü manüel feature'lardır. `DAYS_EMPLOYED = 365243` (≈1000 yıl) bilinen
+    anomalidir — burada `NaN`'a çevrilir.
+    """
+    out = df.copy()
+
+    if "DAYS_EMPLOYED" in out.columns:
+        out["DAYS_EMPLOYED"] = out["DAYS_EMPLOYED"].replace(365243, np.nan)
+
+    if {"AMT_CREDIT", "AMT_INCOME_TOTAL"}.issubset(out.columns):
+        out["CREDIT_INCOME_PERCENT"] = out["AMT_CREDIT"] / out["AMT_INCOME_TOTAL"]
+    if {"AMT_ANNUITY", "AMT_INCOME_TOTAL"}.issubset(out.columns):
+        out["ANNUITY_INCOME_PERCENT"] = out["AMT_ANNUITY"] / out["AMT_INCOME_TOTAL"]
+    if {"AMT_ANNUITY", "AMT_CREDIT"}.issubset(out.columns):
+        out["CREDIT_TERM"] = out["AMT_ANNUITY"] / out["AMT_CREDIT"]
+    if {"DAYS_EMPLOYED", "DAYS_BIRTH"}.issubset(out.columns):
+        out["DAYS_EMPLOYED_PERCENT"] = out["DAYS_EMPLOYED"] / out["DAYS_BIRTH"]
+    if {"AMT_INCOME_TOTAL", "CNT_FAM_MEMBERS"}.issubset(out.columns):
+        out["INCOME_PER_PERSON"] = out["AMT_INCOME_TOTAL"] / out["CNT_FAM_MEMBERS"]
+
+    out = out.replace([np.inf, -np.inf], np.nan)
+    return out
+
+
 def aggregate_credit_card_balance(credit_card_balance: pd.DataFrame) -> pd.DataFrame:
     """Roll up `credit_card_balance` to one row per `SK_ID_CURR`.
 
