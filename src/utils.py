@@ -237,6 +237,121 @@ def plot_categorical_default_rate(
     return ax
 
 
+def categorize_missing(
+    df: pd.DataFrame,
+    *,
+    low: float = 0.2,
+    mid: float = 0.5,
+    exclude: Sequence[str] | None = None,
+) -> dict[str, list[str]]:
+    """Bucket columns by their missing ratio.
+
+    Buckets:
+    - `none`     : 0 missing
+    - `low`      : (0, low]
+    - `medium`   : (low, mid]
+    - `high`     : (mid, 1)  → impute / signal candidate
+    - `extreme`  : ≥ 0.7     → drop candidate
+    """
+    excluded = set(exclude or [])
+    n = len(df)
+    if n == 0:
+        return {k: [] for k in ("none", "low", "medium", "high", "extreme")}
+
+    ratios = df.drop(columns=list(excluded), errors="ignore").isna().mean()
+    buckets: dict[str, list[str]] = {
+        "none": [],
+        "low": [],
+        "medium": [],
+        "high": [],
+        "extreme": [],
+    }
+    for col, r in ratios.items():
+        if r == 0:
+            buckets["none"].append(col)
+        elif r >= 0.7:
+            buckets["extreme"].append(col)
+        elif r > mid:
+            buckets["high"].append(col)
+        elif r > low:
+            buckets["medium"].append(col)
+        else:
+            buckets["low"].append(col)
+    return buckets
+
+
+def plot_missing_top(
+    df: pd.DataFrame,
+    *,
+    top: int = 20,
+    ax: plt.Axes | None = None,
+    color: str = "#ef476f",
+) -> plt.Axes:
+    """Horizontal bar plot of the top-`top` columns by missing ratio."""
+    ratios = df.isna().mean().sort_values(ascending=False).head(top)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, max(4, 0.35 * len(ratios))))
+
+    sns.barplot(x=ratios.values, y=ratios.index.astype(str), color=color, ax=ax)
+    ax.set_title(f"Top {len(ratios)} columns by missing ratio", fontsize=12, weight="bold")
+    ax.set_xlabel("missing ratio")
+    ax.set_ylabel("")
+    ax.set_xlim(0, 1)
+    for i, v in enumerate(ratios.values):
+        ax.text(v + 0.005, i, f"{v:.1%}", va="center", fontsize=9)
+    return ax
+
+
+def missing_target_relationship(
+    df: pd.DataFrame,
+    *,
+    target: str = "TARGET",
+    min_missing_count: int = 100,
+    top: int | None = 15,
+) -> pd.DataFrame:
+    """Quantify whether *missingness itself* carries TARGET signal.
+
+    Her aday sütun için:
+    - `missing_count` : eksik satır sayısı
+    - `target_rate_missing`     : eksiklerde P(TARGET=1)
+    - `target_rate_not_missing` : eksik olmayanlarda P(TARGET=1)
+    - `lift`                    : missing oranı / not-missing oranı
+
+    `min_missing_count` altındaki sütunlar (yetersiz örnek) atılır.
+    """
+    if target not in df.columns:
+        raise KeyError(f"Target column '{target}' not found")
+
+    overall = float(df[target].mean())
+    rows: list[dict[str, float]] = []
+    for col in df.columns:
+        if col == target or not df[col].isna().any():
+            continue
+        mask = df[col].isna()
+        n_missing = int(mask.sum())
+        if n_missing < min_missing_count:
+            continue
+        rate_missing = float(df.loc[mask, target].mean())
+        rate_present = float(df.loc[~mask, target].mean())
+        lift = rate_missing / rate_present if rate_present else np.nan
+        rows.append(
+            {
+                "column": col,
+                "missing_count": n_missing,
+                "target_rate_missing": rate_missing,
+                "target_rate_not_missing": rate_present,
+                "lift": lift,
+            }
+        )
+
+    out = pd.DataFrame(rows).set_index("column")
+    out["abs_lift_distance"] = (out["lift"] - 1).abs()
+    out = out.sort_values("abs_lift_distance", ascending=False).drop(columns="abs_lift_distance")
+    out.attrs["overall_target_rate"] = overall
+    return out.head(top) if top else out
+
+
 def plot_numeric_by_target(
     df: pd.DataFrame,
     col: str,
