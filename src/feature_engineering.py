@@ -157,3 +157,182 @@ def merge_features(
     for feat in features:
         out = out.merge(feat, how="left", on=on)
     return out
+
+
+def _generic_aggregate(
+    df: pd.DataFrame,
+    *,
+    group_col: str,
+    num_aggregations: dict[str, list[str]],
+    prefix: str,
+    encode_cats: bool = True,
+    drop_cols: Iterable[str] | None = None,
+    count_name: str | None = None,
+) -> pd.DataFrame:
+    """Generic groupby-agg over numeric (+ optionally one-hot) columns.
+
+    `bureau` dışındaki tablolar için tekrar eden boilerplate'i tek noktada
+    toplar: kategorik kolonlar one-hot edilir, numerik agregasyonlar uygulanır,
+    sütun isimleri düzleştirilir, bellek küçültülür.
+    """
+    work = df.copy()
+    if drop_cols:
+        work = work.drop(columns=[c for c in drop_cols if c in work.columns])
+
+    cat_cols: list[str] = []
+    if encode_cats:
+        work, cat_cols = _one_hot_encode(work)
+
+    available_num = {k: v for k, v in num_aggregations.items() if k in work.columns}
+    cat_aggs = {c: ["mean"] for c in cat_cols}
+
+    agg = work.groupby(group_col).agg({**available_num, **cat_aggs})
+    agg = _flatten_agg_columns(agg, prefix=prefix)
+
+    if count_name:
+        agg[count_name] = work.groupby(group_col).size()
+
+    return reduce_mem_usage(agg.reset_index(), verbose=False)
+
+
+def aggregate_previous_application(previous_application: pd.DataFrame) -> pd.DataFrame:
+    """Roll up `previous_application` to one row per `SK_ID_CURR`.
+
+    Eklenen türetilmiş feature: `APP_CREDIT_PERC = AMT_APPLICATION / AMT_CREDIT`.
+    `NAME_CONTRACT_STATUS = Approved / Refused` filtreleriyle ayrı özetler de
+    üretilir, çünkü onaylanan vs. reddedilen başvurular ileride ayrı sinyaller
+    taşır.
+    """
+    prev = previous_application.copy()
+    if "AMT_APPLICATION" in prev.columns and "AMT_CREDIT" in prev.columns:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = prev["AMT_APPLICATION"] / prev["AMT_CREDIT"]
+        prev["APP_CREDIT_PERC"] = ratio.replace([np.inf, -np.inf], np.nan)
+
+    num_aggregations: dict[str, list[str]] = {
+        "AMT_ANNUITY": ["min", "max", "mean"],
+        "AMT_APPLICATION": ["min", "max", "mean"],
+        "AMT_CREDIT": ["min", "max", "mean"],
+        "APP_CREDIT_PERC": ["min", "max", "mean", "var"],
+        "AMT_DOWN_PAYMENT": ["min", "max", "mean"],
+        "AMT_GOODS_PRICE": ["min", "max", "mean"],
+        "HOUR_APPR_PROCESS_START": ["min", "max", "mean"],
+        "RATE_DOWN_PAYMENT": ["min", "max", "mean"],
+        "DAYS_DECISION": ["min", "max", "mean"],
+        "CNT_PAYMENT": ["mean", "sum"],
+    }
+
+    agg = _generic_aggregate(
+        prev,
+        group_col="SK_ID_CURR",
+        num_aggregations=num_aggregations,
+        prefix="PREV",
+        drop_cols=["SK_ID_PREV"],
+        count_name="PREV_COUNT",
+    )
+
+    for status in ("Approved", "Refused"):
+        col = f"NAME_CONTRACT_STATUS_{status}"
+        prev_with_flag = prev.copy()
+        if col not in pd.get_dummies(prev_with_flag, columns=["NAME_CONTRACT_STATUS"]).columns:
+            continue
+        subset = prev_with_flag[prev_with_flag["NAME_CONTRACT_STATUS"] == status]
+        if subset.empty:
+            continue
+        sub_agg = _generic_aggregate(
+            subset,
+            group_col="SK_ID_CURR",
+            num_aggregations=num_aggregations,
+            prefix=f"PREV_{status.upper()}",
+            drop_cols=["SK_ID_PREV"],
+            encode_cats=False,
+        )
+        agg = agg.merge(sub_agg, how="left", on="SK_ID_CURR")
+
+    return reduce_mem_usage(agg, verbose=False)
+
+
+def aggregate_pos_cash(pos_cash: pd.DataFrame) -> pd.DataFrame:
+    """Roll up `POS_CASH_balance` to one row per `SK_ID_CURR`."""
+    num_aggregations: dict[str, list[str]] = {
+        "MONTHS_BALANCE": ["max", "mean", "size"],
+        "SK_DPD": ["max", "mean"],
+        "SK_DPD_DEF": ["max", "mean"],
+    }
+    return _generic_aggregate(
+        pos_cash,
+        group_col="SK_ID_CURR",
+        num_aggregations=num_aggregations,
+        prefix="POS",
+        drop_cols=["SK_ID_PREV"],
+        count_name="POS_COUNT",
+    )
+
+
+def aggregate_installments_payments(installments_payments: pd.DataFrame) -> pd.DataFrame:
+    """Roll up `installments_payments` to one row per `SK_ID_CURR`.
+
+    Türetilmiş ödeme disiplin metrikleri:
+    - `PAYMENT_PERC` : ödenen / planlanan
+    - `PAYMENT_DIFF` : planlanan − ödenen (eksik tutar)
+    - `DPD`          : geç ödeme gün sayısı (≥0)
+    - `DBD`          : erken ödeme gün sayısı (≥0)
+    """
+    ins = installments_payments.copy()
+
+    if "AMT_PAYMENT" in ins.columns and "AMT_INSTALMENT" in ins.columns:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ins["PAYMENT_PERC"] = ins["AMT_PAYMENT"] / ins["AMT_INSTALMENT"]
+        ins["PAYMENT_PERC"] = ins["PAYMENT_PERC"].replace([np.inf, -np.inf], np.nan)
+        ins["PAYMENT_DIFF"] = ins["AMT_INSTALMENT"] - ins["AMT_PAYMENT"]
+
+    if "DAYS_ENTRY_PAYMENT" in ins.columns and "DAYS_INSTALMENT" in ins.columns:
+        diff = ins["DAYS_ENTRY_PAYMENT"] - ins["DAYS_INSTALMENT"]
+        ins["DPD"] = diff.clip(lower=0)
+        ins["DBD"] = (-diff).clip(lower=0)
+
+    num_aggregations: dict[str, list[str]] = {
+        "NUM_INSTALMENT_VERSION": ["nunique"],
+        "DPD": ["max", "mean", "sum"],
+        "DBD": ["max", "mean", "sum"],
+        "PAYMENT_PERC": ["max", "mean", "var"],
+        "PAYMENT_DIFF": ["max", "mean", "var"],
+        "AMT_INSTALMENT": ["max", "mean", "sum"],
+        "AMT_PAYMENT": ["max", "mean", "sum"],
+        "DAYS_ENTRY_PAYMENT": ["max", "mean", "sum"],
+    }
+
+    return _generic_aggregate(
+        ins,
+        group_col="SK_ID_CURR",
+        num_aggregations=num_aggregations,
+        prefix="INSTAL",
+        drop_cols=["SK_ID_PREV"],
+        encode_cats=False,
+        count_name="INSTAL_COUNT",
+    )
+
+
+def aggregate_credit_card_balance(credit_card_balance: pd.DataFrame) -> pd.DataFrame:
+    """Roll up `credit_card_balance` to one row per `SK_ID_CURR`.
+
+    Tüm numerik sütunlar üzerinde `min/max/mean/sum/var` agregasyonu uygulanır;
+    kategorik sütunlar (NAME_CONTRACT_STATUS) one-hot edilip ortalama alınır.
+    """
+    cc = credit_card_balance.copy()
+    drop_cols = ["SK_ID_PREV"]
+    cc = cc.drop(columns=[c for c in drop_cols if c in cc.columns])
+
+    numeric_cols = [
+        c for c in cc.columns
+        if c != "SK_ID_CURR" and pd.api.types.is_numeric_dtype(cc[c])
+    ]
+    num_aggregations = {c: ["min", "max", "mean", "sum", "var"] for c in numeric_cols}
+
+    return _generic_aggregate(
+        cc,
+        group_col="SK_ID_CURR",
+        num_aggregations=num_aggregations,
+        prefix="CC",
+        count_name="CC_COUNT",
+    )
