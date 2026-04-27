@@ -1,0 +1,42 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Data files (keep lightweight metadata/scripts in repo)
+data/raw/
+*.csv
+*.parquet
+*.feather
+*.h5
+*.pkl
+*.joblib
+
+# Model and experiment artifacts
+models/
+artifacts/
+mlruns/
+wandb/
+
+# OS / IDE noise
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local large archives
+*.zip
