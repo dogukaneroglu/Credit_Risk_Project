@@ -111,6 +111,7 @@ Credit_Risk_Project/
 │   └── scorecard.py                       # PDO math, KS / lift / cutoff utilities
 ├── scripts/
 │   └── generate_readme_assets.py          # rebuild the figures shown above
+├── predict.py                              # CLI: PD + score + decision for new applicants
 ├── data/                                   # gitignored (raw + processed parquet)
 ├── assets/readme/                          # static figures used in this README
 ├── requirements.txt
@@ -188,6 +189,33 @@ Notebook 05 takes ~10 minutes on a CPU; everything else runs in seconds to a few
 ```bash
 python scripts/generate_readme_assets.py
 ```
+
+### Score new applicants from the command line
+
+Once the notebooks have produced the artifacts, `predict.py` turns the system into a one-command credit-decision tool:
+
+```bash
+# Demo: score 5 random customers from the validation set
+python predict.py
+
+# Score a custom file with a stricter policy and persist the output
+python predict.py --input new_customers.parquet --n-samples 10 --cutoff 600 --output decisions.csv
+```
+
+Sample output:
+
+```text
++------------+--------+-------+----------+
+| SK_ID_CURR | PD (%) | Score | Decision |
++============+========+=======+==========+
+|     116731 |   7.19 |   589 | APPROVE  |
+|     209765 |   3.78 |   608 | APPROVE  |
+|     218332 |  22.51 |   551 | REJECT   |
+|     425755 |  29.31 |   540 | REJECT   |
++------------+--------+-------+----------+
+```
+
+The CLI loads the LightGBM booster, the scorecard parameters and the selected feature list straight from `data/processed/`, applies the same column transforms used at training time, and emits per-customer PD, score and APPROVE / REJECT decision.
 
 ---
 

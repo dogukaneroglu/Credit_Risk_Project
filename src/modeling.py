@@ -94,6 +94,44 @@ def prepare_features(
     return X, y, list(X.columns)
 
 
+def prepare_features_for_inference(
+    df: pd.DataFrame,
+    *,
+    feature_names: list[str] | None = None,
+    id_cols: tuple[str, ...] = ("SK_ID_CURR",),
+    target: str = "TARGET",
+) -> pd.DataFrame:
+    """Build a feature matrix ready for `Booster.predict`.
+
+    Mirrors the column transforms applied in :func:`prepare_features` (sanitize
+    + categorical coercion) but tolerates inputs that lack the target column,
+    and — when ``feature_names`` is provided — reorders / restricts columns to
+    that exact list so the downstream booster sees them in training order.
+    """
+    drop = list(id_cols)
+    if target in df.columns:
+        drop.append(target)
+
+    cols = [c for c in df.columns if c not in drop]
+    X = df[cols].copy()
+    X.columns = _sanitize_feature_names(X.columns)
+
+    for col in X.columns:
+        if pd.api.types.is_string_dtype(X[col]) and not isinstance(X[col].dtype, pd.CategoricalDtype):
+            X[col] = X[col].astype("category")
+
+    if feature_names is not None:
+        missing = [f for f in feature_names if f not in X.columns]
+        if missing:
+            raise ValueError(
+                f"Input is missing {len(missing)} expected features. "
+                f"First missing: {missing[:5]}"
+            )
+        X = X[feature_names]
+
+    return X
+
+
 def train_lightgbm(
     X_train: pd.DataFrame,
     y_train: pd.Series,
